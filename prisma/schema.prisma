@@ -1,0 +1,1277 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ==================== AUTHENTICATION & USER MANAGEMENT ====================
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model User {
+  id            String     @id @default(cuid())
+  userId        Int        @unique @default(autoincrement())
+  name          String
+  firstName     String
+  lastName      String
+  phone         String     @unique
+  email         String     @unique
+  emailVerified Boolean    @default(false)
+  password      String
+  imageUrl      String     @default("https://ylhpxhcgr4.ufs.sh/f/ZVlDsNdibGfFLkXm6f8jxEOgRvuoCGdTw7N05shB2kHlF1LU")
+  role          UserRole   @default(TENANT)
+  status        UserStatus @default(PENDING)
+  isApproved    Boolean    @default(false)
+  token         String?
+
+  // Address (for tenants)
+  address  String?
+  district String?
+  city     String?
+
+  // Location tracking (for field officers)
+  currentLatitude  Float?
+  currentLongitude Float?
+  lastLocationAt   DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Auth Relations
+  accounts      Account[]
+  sessions      Session[]
+  resetTokens   PasswordResetToken[]
+  refreshTokens RefreshToken[]
+
+  // Field Officer relations
+  sourcedProperties    Property[]           @relation("PropertySourcedBy")
+  assignedProperties   Property[]           @relation("PropertyAssignedTo")
+  conductedInspections PropertyInspection[] @relation("InspectionConductedBy")
+  handledInquiries     Inquiry[]            @relation("InquiryHandledBy")
+  onboardedLandlords   Landlord[]           @relation("LandlordOnboardedBy")
+
+  // Tenant relations
+  ownedLandlordProfile Landlord?          @relation("LandlordUser")
+  propertyInterests    PropertyInterest[]
+  searchFeePayments    SearchFeePayment[]
+  tenancies            Tenancy[]
+  favorites            Favorite[]
+  reviews              Review[]
+  payments             Payment[]
+  notifications        Notification[]
+  chatMessages         ChatMessage[]      @relation("UserMessages")
+
+  // Activity tracking
+  activities ActivityLog[]
+  inquiries  Inquiry[]
+
+  @@index([role])
+  @@index([status])
+  @@index([email])
+  @@index([phone])
+}
+
+enum UserRole {
+  SUPER_ADMIN // Full system access
+  ADMIN // Administrative access
+  MANAGER // Team manager
+  FIELD_OFFICER // Goes out to source properties & conduct inspections
+  TENANT // Looking for property
+  LANDLORD // Property owner (also a user)
+}
+
+enum UserStatus {
+  ACTIVE // Normal active account
+  INACTIVE // Cannot login
+  PENDING // Awaiting verification
+  SUSPENDED // Temporarily blocked
+  DEACTIVATED // Self-deactivated
+  BANNED // Permanently blocked
+}
+
+model RefreshToken {
+  id        String   @id @default(uuid())
+  token     String   @unique
+  userId    String
+  expiresAt DateTime
+  revoked   Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model PasswordResetToken {
+  id        String    @id @default(cuid())
+  userId    String
+  tokenHash String
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+// ==================== LANDLORD MANAGEMENT ====================
+// Field officers onboard landlords after they agree to list their properties
+
+model Landlord {
+  id         String @id @default(cuid())
+  landlordId Int    @unique @default(autoincrement())
+
+  // Link to user account (optional - landlord may or may not have app account)
+  userId String? @unique
+  user   User?   @relation("LandlordUser", fields: [userId], references: [id], onDelete: SetNull)
+
+  // Personal Information
+  firstName String
+  lastName  String
+  email     String  @unique
+  phone     String  @unique
+  altPhone  String?
+  imageUrl  String?
+
+  // Identification
+  idType     IdType  @default(NATIONAL_ID)
+  idNumber   String?
+  idImageUrl String?
+
+  // Address
+  address  String?
+  district String?
+  city     String?
+
+  // Bank/Payment Details (for clearing payments)
+  bankName            String?
+  bankBranch          String?
+  accountNumber       String?
+  accountName         String?
+  mobileMoneyNumber   String?
+  mobileMoneyName     String?
+  mobileMoneyProvider MobileMoneyProvider?
+
+  // MOU & Agreement
+  mouSigned      Boolean   @default(false)
+  mouSignedAt    DateTime?
+  mouDocumentUrl String?
+  agreedToTerms  Boolean   @default(false)
+  agreedAt       DateTime?
+
+  // Commission Agreement
+  commissionRate Float @default(10) // Percentage we take
+
+  // Status
+  status     LandlordStatus @default(PENDING)
+  isVerified Boolean        @default(false)
+  verifiedAt DateTime?
+  verifiedBy String?
+
+  // Who onboarded this landlord
+  onboardedById String?
+  onboardedBy   User?    @relation("LandlordOnboardedBy", fields: [onboardedById], references: [id])
+  onboardedAt   DateTime @default(now())
+
+  notes String? @db.Text
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  properties       Property[]
+  landlordPayments LandlordPayment[]
+
+  @@index([status])
+  @@index([email])
+  @@index([phone])
+  @@index([onboardedById])
+}
+
+enum IdType {
+  NATIONAL_ID
+  PASSPORT
+  DRIVING_LICENSE
+  REFUGEE_ID
+  VILLAGE_LC_LETTER
+}
+
+enum LandlordStatus {
+  PENDING // Just registered, MOU not signed
+  MOU_PENDING // Awaiting MOU signing
+  ACTIVE // MOU signed, can list properties
+  SUSPENDED // Temporarily blocked
+  BLACKLISTED // Permanently blocked
+}
+
+enum MobileMoneyProvider {
+  MTN_MOMO
+  AIRTEL_MONEY
+}
+
+// ==================== PROPERTY MANAGEMENT ====================
+// Properties are uploaded by field officers after landlord signs MOU
+
+model Property {
+  id         String @id @default(cuid())
+  propertyId Int    @unique @default(autoincrement())
+  slug       String @unique
+
+  // Basic Info
+  title       String
+  description String @db.Text
+
+  // Category (determines pricing model)
+  category PropertyCategory
+
+  // Property Type (what kind of property)
+  propertyType PropertyType
+
+  // Location Details
+  address        String
+  streetAddress  String?
+  district       String
+  city           String
+  nearestTown    String?
+  distanceToTown String? // "5 minutes walk", "2 km"
+  landmark       String?
+  latitude       Float?
+  longitude      Float?
+  googleMapsUrl  String?
+  directionNotes String? @db.Text // How to get there
+
+  // For Hostels - nearby institutions
+  nearbyInstitutions String[] // ["Makerere University", "Mulago Hospital"]
+
+  // Property Details
+  bedrooms      Int?
+  bathrooms     Int?
+  rooms         Int? // Total rooms (for hostels)
+  squareMeters  Float?
+  floors        Int?
+  parkingSpaces Int?
+  yearBuilt     Int?
+
+  // Hostel specific
+  totalBeds         Int?
+  genderRestriction GenderRestriction?
+
+  // Media
+  images         String[]
+  videos         String[]
+  virtualTourUrl String?
+
+  // ========== PRICING (varies by category) ==========
+
+  currency String @default("UGX")
+
+  // For RENTALS & APARTMENTS (monthly)
+  pricePerMonth   Float?
+  securityDeposit Float? // Usually 1-2 months
+
+  // For HOSTELS (semester/year)
+  pricePerSemester Float?
+  pricePerYear     Float?
+
+  // For SHORT_STAY / AIRBNB (nightly/weekly)
+  pricePerNight Float?
+  pricePerWeek  Float?
+
+  // Search/Inspection Fee (tenant pays this to view the property)
+  searchFee Float @default(50000) // Default 50,000 UGX
+
+  // ========== UTILITIES ==========
+  waterIncluded       Boolean @default(false)
+  electricityIncluded Boolean @default(false)
+  internetIncluded    Boolean @default(false)
+  utilitiesNotes      String? // "Water is metered separately"
+
+  // ========== AMENITIES & FEATURES ==========
+  amenities String[] // ["WiFi", "Parking", "Security Guard", "CCTV", "Generator", "Water Tank"]
+  furnished FurnishedStatus @default(UNFURNISHED)
+
+  // Rules
+  petsAllowed    Boolean  @default(false)
+  smokingAllowed Boolean  @default(false)
+  rules          String[]
+
+  // For Short Stay
+  checkInTime  String? // "14:00"
+  checkOutTime String? // "11:00"
+  minNights    Int?
+  maxNights    Int?
+
+  // ========== OWNERSHIP & MANAGEMENT ==========
+  landlordId String
+  landlord   Landlord @relation(fields: [landlordId], references: [id], onDelete: Cascade)
+
+  // Field officer who sourced this property
+  sourcedById String?
+  sourcedBy   User?    @relation("PropertySourcedBy", fields: [sourcedById], references: [id])
+  sourcedAt   DateTime @default(now())
+
+  // Field officer assigned to handle this property
+  assignedToId String?
+  assignedTo   User?   @relation("PropertyAssignedTo", fields: [assignedToId], references: [id])
+
+  // ========== STATUS & VERIFICATION ==========
+  status             PropertyStatus @default(PENDING_APPROVAL)
+  isVerified         Boolean        @default(false)
+  verifiedAt         DateTime?
+  verifiedBy         String?
+  lastInspectionDate DateTime?
+
+  // Availability
+  isAvailable    Boolean   @default(true)
+  availableFrom  DateTime?
+  availableUntil DateTime?
+
+  // ========== STATS ==========
+  viewsCount     BigInt @default(0)
+  inquiriesCount Int    @default(0)
+  interestsCount Int    @default(0)
+
+  // Featured
+  isFeatured    Boolean   @default(false)
+  featuredUntil DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  interests      PropertyInterest[]
+  searchPayments SearchFeePayment[]
+  inspections    PropertyInspection[]
+  tenancies      Tenancy[]
+  inquiries      Inquiry[]
+  favorites      Favorite[]
+  reviews        Review[]
+
+  @@index([category])
+  @@index([propertyType])
+  @@index([district])
+  @@index([city])
+  @@index([status])
+  @@index([landlordId])
+  @@index([sourcedById])
+  @@index([assignedToId])
+  @@index([pricePerMonth])
+  @@index([pricePerSemester])
+  @@index([pricePerNight])
+  @@index([isFeatured])
+  @@index([createdAt])
+}
+
+enum PropertyCategory {
+  HOSTEL // Student hostels - priced per semester/year
+  APARTMENT // Apartments - priced per month
+  RENTAL // Houses/Rooms for rent - priced per month
+  SHORT_STAY // Airbnb style - priced per night/week
+}
+
+enum PropertyType {
+  // Hostels
+  STUDENT_HOSTEL
+  WORKERS_HOSTEL
+
+  // Apartments
+  STUDIO_APARTMENT
+  ONE_BEDROOM
+  TWO_BEDROOM
+  THREE_BEDROOM
+  PENTHOUSE
+
+  // Rentals
+  SINGLE_ROOM
+  DOUBLE_ROOM
+  SELF_CONTAINED
+  HOUSE
+  BUNGALOW
+  DUPLEX
+  MANSION
+  BOYS_QUARTER
+
+  // Short Stay
+  AIRBNB_ROOM
+  AIRBNB_APARTMENT
+  AIRBNB_HOUSE
+  GUEST_HOUSE
+  LODGE
+  SERVICED_APARTMENT
+}
+
+enum PropertyStatus {
+  PENDING_APPROVAL // Awaiting admin approval
+  ACTIVE // Listed and available
+  OCCUPIED // Currently has tenant
+  UNDER_MAINTENANCE // Temporarily unavailable
+  INACTIVE // Removed from listings
+  SUSPENDED // Blocked by admin
+}
+
+enum FurnishedStatus {
+  FURNISHED
+  SEMI_FURNISHED
+  UNFURNISHED
+}
+
+enum GenderRestriction {
+  MALE_ONLY
+  FEMALE_ONLY
+  MIXED
+}
+
+// ==================== TENANT INTEREST & INQUIRY FLOW ====================
+// Tenant shows interest via WhatsApp/Call/Chat → Pays search fee → Inspects → Takes it or not
+
+model Inquiry {
+  id         String   @id @default(cuid())
+  inquiryId  Int      @unique @default(autoincrement())
+  propertyId String
+  property   Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+
+  // Who made the inquiry (can be anonymous initially)
+  userId String?
+  user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  // Contact Details (if not logged in)
+  name  String?
+  phone String
+  email String?
+
+  // How they contacted us
+  channel InquiryChannel
+  message String?        @db.Text
+
+  // Status
+  status   InquiryStatus @default(NEW)
+  priority Priority      @default(MEDIUM)
+
+  // Assigned field officer to handle
+  handledById String?
+  handledBy   User?   @relation("InquiryHandledBy", fields: [handledById], references: [id])
+
+  // Response tracking
+  respondedAt     DateTime?
+  responseMessage String?   @db.Text
+  notes           String?   @db.Text
+
+  // Conversion tracking
+  convertedToInterest Boolean @default(false)
+  interestId          String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([propertyId])
+  @@index([userId])
+  @@index([status])
+  @@index([channel])
+  @@index([handledById])
+  @@index([createdAt])
+}
+
+enum InquiryChannel {
+  WHATSAPP
+  PHONE_CALL
+  WEBSITE_CHAT
+  WALK_IN
+  SOCIAL_MEDIA
+  REFERRAL
+}
+
+enum InquiryStatus {
+  NEW // Just received
+  CONTACTED // We've responded
+  INTERESTED // They're interested, needs to pay search fee
+  SEARCH_FEE_PAID // Paid, ready for inspection
+  INSPECTION_DONE // Inspected the property
+  CONVERTED // Took the property
+  NOT_INTERESTED // Didn't want it
+  CLOSED // Closed for other reasons
+}
+
+enum Priority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+// When tenant confirms interest and wants to proceed
+model PropertyInterest {
+  id         String   @id @default(cuid())
+  interestId Int      @unique @default(autoincrement())
+  propertyId String
+  property   Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Interest Details
+  intendedMoveIn DateTime?
+  intendedStay   String? // "6 months", "1 year", "1 semester"
+  occupants      Int       @default(1)
+  message        String?   @db.Text
+
+  // Status Flow: INTERESTED → SEARCH_FEE_PAID → INSPECTION_SCHEDULED → INSPECTED → TAKEN/REJECTED
+  status InterestStatus @default(INTERESTED)
+
+  // Search Fee
+  searchFeePaid   Boolean   @default(false)
+  searchFeeAmount Float?
+  searchFeePaidAt DateTime?
+  searchPaymentId String?
+
+  // Inspection
+  inspectionScheduled Boolean   @default(false)
+  inspectionDate      DateTime?
+  inspectionTime      String?
+  inspectionId        String?
+
+  // Outcome
+  propertyTaken   Boolean   @default(false)
+  takenAt         DateTime?
+  rejectionReason String?
+
+  notes String? @db.Text
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([propertyId, userId])
+  @@index([propertyId])
+  @@index([userId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+enum InterestStatus {
+  INTERESTED // Initial interest
+  SEARCH_FEE_PENDING // Needs to pay search fee
+  SEARCH_FEE_PAID // Paid search fee
+  INSPECTION_SCHEDULED // Inspection date set
+  INSPECTED // Has viewed the property
+  TAKEN // Decided to take it
+  NOT_INTERESTED // Didn't want it after inspection
+  CANCELLED // Cancelled by tenant
+}
+
+// ==================== SEARCH FEE PAYMENT ====================
+// Tenant pays search fee before inspecting property
+
+model SearchFeePayment {
+  id         String   @id @default(cuid())
+  paymentId  Int      @unique @default(autoincrement())
+  propertyId String
+  property   Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Payment Details
+  amount   Float
+  currency String @default("UGX")
+
+  // Payment Method
+  paymentMethod  PaymentMethodType
+  phoneNumber    String? // For mobile money
+  transactionRef String?
+
+  // Status
+  status PaymentStatus @default(PENDING)
+  paidAt DateTime?
+
+  // Receipt
+  receiptNumber String? @unique
+  receiptUrl    String?
+
+  // Gateway response
+  gatewayResponse Json?
+  failureReason   String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([propertyId])
+  @@index([userId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+// ==================== PROPERTY INSPECTION ====================
+// After paying search fee, field officer takes tenant to inspect property
+
+model PropertyInspection {
+  id           String   @id @default(cuid())
+  inspectionId Int      @unique @default(autoincrement())
+  propertyId   String
+  property     Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+
+  // Who's inspecting (tenant)
+  tenantId    String
+  tenantName  String
+  tenantPhone String
+
+  // Scheduled Date/Time
+  scheduledDate DateTime
+  scheduledTime String // "10:00 AM"
+  meetingPoint  String?
+
+  // Field Officer conducting inspection
+  conductedById String?
+  conductedBy   User?   @relation("InspectionConductedBy", fields: [conductedById], references: [id])
+
+  // Status
+  status      InspectionStatus @default(SCHEDULED)
+  completedAt DateTime?
+
+  // Outcome
+  tenantInterested Boolean? // Did they like it?
+  tenantFeedback   String?  @db.Text
+  officerNotes     String?  @db.Text
+
+  // If tenant took the property
+  propertyTaken Boolean @default(false)
+  tenancyId     String?
+
+  // If rescheduled
+  rescheduledFrom  DateTime?
+  rescheduleReason String?
+  rescheduleCount  Int       @default(0)
+
+  // If no-show or cancelled
+  noShowReason       String?
+  cancelledAt        DateTime?
+  cancellationReason String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([propertyId])
+  @@index([conductedById])
+  @@index([status])
+  @@index([scheduledDate])
+}
+
+enum InspectionStatus {
+  SCHEDULED
+  CONFIRMED
+  IN_PROGRESS
+  COMPLETED
+  NO_SHOW_TENANT
+  NO_SHOW_OFFICER
+  CANCELLED
+  RESCHEDULED
+}
+
+// ==================== TENANCY ====================
+// When tenant takes the property: pays first 3 months to us → we clear landlord → rest to landlord
+
+model Tenancy {
+  id         String   @id @default(cuid())
+  tenancyId  Int      @unique @default(autoincrement())
+  propertyId String
+  property   Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Tenancy Period
+  startDate    DateTime
+  endDate      DateTime?
+  duration     Int? // In months (for rentals) or semesters (for hostels)
+  durationType DurationType @default(MONTHS)
+
+  // Pricing at time of tenancy
+  agreedPrice     Float // Monthly rent or semester price or nightly rate
+  securityDeposit Float?
+  currency        String @default("UGX")
+
+  // Initial Payment (First 3 months to UG-STAYS)
+  initialPaymentMonths Int           @default(3) // Usually 3 months
+  initialPaymentAmount Float // Total for first 3 months
+  initialPaymentStatus PaymentStatus @default(PENDING)
+  initialPaymentDate   DateTime?
+  initialPaymentRef    String?
+
+  // Status
+  status TenancyStatus @default(PENDING_PAYMENT)
+
+  // Tenant Details at time of move-in
+  tenantName     String
+  tenantPhone    String
+  tenantEmail    String?
+  tenantIdNumber String?
+  tenantIdUrl    String?
+
+  // Emergency Contact
+  emergencyName     String?
+  emergencyPhone    String?
+  emergencyRelation String?
+
+  // Move In/Out
+  moveInDate    DateTime?
+  moveOutDate   DateTime?
+  actualMoveIn  DateTime?
+  actualMoveOut DateTime?
+
+  // Agreement
+  agreementSigned   Boolean   @default(false)
+  agreementSignedAt DateTime?
+  agreementUrl      String?
+
+  // Landlord Clearance (after we receive initial payment)
+  landlordCleared   Boolean   @default(false)
+  landlordClearedAt DateTime?
+  landlordClearedBy String?
+  landlordPaymentId String? // Reference to landlord payment
+
+  // Termination
+  terminatedAt      DateTime?
+  terminationReason String?
+  terminatedBy      String? // "TENANT", "LANDLORD", "ADMIN"
+
+  // Deposit Return
+  depositReturned   Float?
+  depositDeductions Float?
+  deductionReasons  String?
+
+  notes String? @db.Text
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  rentPayments RentPayment[]
+
+  @@index([propertyId])
+  @@index([userId])
+  @@index([status])
+  @@index([startDate])
+  @@index([endDate])
+}
+
+enum DurationType {
+  DAYS // For short stay
+  WEEKS // For short stay
+  MONTHS // For rentals
+  SEMESTERS // For hostels
+  YEARS // For long term
+}
+
+enum TenancyStatus {
+  PENDING_PAYMENT // Awaiting initial payment
+  PAYMENT_RECEIVED // We received payment
+  LANDLORD_CLEARING // Processing landlord payment
+  ACTIVE // Tenant has moved in
+  EXPIRING // Within 30 days of end
+  EXPIRED // Past end date
+  RENEWED // Extended
+  TERMINATED // Ended early
+  COMPLETED // Successfully ended
+}
+
+// ==================== RENT PAYMENTS ====================
+// After first 3 months, tenant pays remaining rent directly to landlord
+// But we track it for record keeping
+
+model RentPayment {
+  id        String  @id @default(cuid())
+  paymentId Int     @unique @default(autoincrement())
+  tenancyId String
+  tenancy   Tenancy @relation(fields: [tenancyId], references: [id], onDelete: Cascade)
+
+  // What period is this for
+  periodType  PeriodType // MONTH, SEMESTER, WEEK, NIGHT
+  periodLabel String // "January 2025", "Semester 1 2025", "Week 1"
+  periodStart DateTime
+  periodEnd   DateTime
+
+  // Amount
+  amount   Float
+  currency String @default("UGX")
+
+  // Who receives this payment
+  paidTo PaidTo // UG_STAYS (first 3 months) or LANDLORD (after)
+
+  // Payment Details
+  paymentMethod  String?
+  transactionRef String?
+  status         PaymentStatus @default(PENDING)
+  dueDate        DateTime
+  paidAt         DateTime?
+
+  // Late payment
+  isLate  Boolean @default(false)
+  lateFee Float   @default(0)
+
+  // Receipt
+  receiptNumber String?
+  receiptUrl    String?
+
+  notes String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([tenancyId])
+  @@index([status])
+  @@index([dueDate])
+  @@index([paidTo])
+}
+
+enum PeriodType {
+  NIGHT
+  WEEK
+  MONTH
+  SEMESTER
+  YEAR
+}
+
+enum PaidTo {
+  UG_STAYS // First 3 months come to us
+  LANDLORD // Remaining payments go to landlord
+}
+
+// ==================== LANDLORD PAYMENTS ====================
+// When we clear the landlord after receiving tenant's first 3 months
+
+model LandlordPayment {
+  id         String   @id @default(cuid())
+  paymentId  Int      @unique @default(autoincrement())
+  landlordId String
+  landlord   Landlord @relation(fields: [landlordId], references: [id], onDelete: Cascade)
+
+  // What this payment is for
+  paymentType LandlordPaymentType
+  description String?
+  tenancyRef  String? // Reference to tenancy
+
+  // Amounts
+  grossAmount      Float // Total tenant paid
+  commissionRate   Float // Our percentage
+  commissionAmount Float // Our commission
+  netAmount        Float // What landlord receives (gross - commission)
+  currency         String @default("UGX")
+
+  // Payment Details
+  paymentMethod  PaymentMethodType
+  accountNumber  String? // Bank account or mobile money
+  accountName    String?
+  transactionRef String?
+
+  // Status
+  status      PaymentStatus @default(PENDING)
+  paidAt      DateTime?
+  confirmedAt DateTime?
+  confirmedBy String?
+
+  // Receipt/Proof
+  receiptUrl String?
+  proofUrl   String?
+
+  notes String? @db.Text
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([landlordId])
+  @@index([status])
+  @@index([paymentType])
+  @@index([createdAt])
+}
+
+enum LandlordPaymentType {
+  INITIAL_CLEARANCE // First 3 months clearance
+  COMMISSION_PAYMENT // Regular commission
+  BONUS // Any bonuses
+  REFUND // Refunds
+}
+
+// ==================== GENERAL PAYMENTS ====================
+
+model Payment {
+  id        String @id @default(cuid())
+  paymentId Int    @unique @default(autoincrement())
+  userId    String
+  user      User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // What is this payment for
+  paymentType GeneralPaymentType
+  referenceId String? // ID of related record
+  description String?
+
+  // Amount
+  amount   Float
+  currency String @default("UGX")
+
+  // Payment Method
+  paymentMethod PaymentMethodType
+  phoneNumber   String?
+  cardLast4     String?
+  bankName      String?
+
+  // Gateway
+  transactionId   String? @unique
+  gatewayName     String? // "MTN_MOMO", "AIRTEL_MONEY", "PESAPAL", "BANK"
+  gatewayResponse Json?
+
+  // Status
+  status        PaymentStatus @default(PENDING)
+  paidAt        DateTime?
+  failureReason String?
+
+  // Receipt
+  receiptNumber String?
+  receiptUrl    String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+  @@index([status])
+  @@index([paymentType])
+  @@index([transactionId])
+  @@index([createdAt])
+}
+
+enum GeneralPaymentType {
+  SEARCH_FEE
+  INITIAL_RENT
+  RENT
+  SECURITY_DEPOSIT
+  SERVICE_FEE
+  LATE_FEE
+  OTHER
+}
+
+enum PaymentMethodType {
+  MTN_MOMO
+  AIRTEL_MONEY
+  BANK_TRANSFER
+  BANK_CARD
+  CASH
+  PESAPAL
+  FLUTTERWAVE
+}
+
+enum PaymentStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  REFUNDED
+  CANCELLED
+}
+
+// ==================== CHAT / MESSAGING ====================
+// Website chat with agents
+
+model ChatConversation {
+  id String @id @default(cuid())
+
+  // Visitor (may or may not be logged in)
+  visitorId    String?
+  visitorName  String?
+  visitorPhone String?
+  visitorEmail String?
+
+  // If logged in user
+  userId String?
+
+  // Related property (if chatting about specific property)
+  propertyId String?
+
+  // Assigned agent
+  assignedAgentId String?
+
+  // Status
+  status ChatStatus @default(OPEN)
+
+  // Session info
+  startedAt DateTime  @default(now())
+  endedAt   DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  messages ChatMessage[]
+
+  @@index([userId])
+  @@index([propertyId])
+  @@index([assignedAgentId])
+  @@index([status])
+}
+
+model ChatMessage {
+  id             String           @id @default(cuid())
+  conversationId String
+  conversation   ChatConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  // Sender
+  senderId   String?
+  sender     User?      @relation("UserMessages", fields: [senderId], references: [id])
+  senderType SenderType
+  senderName String?
+
+  // Message
+  message     String      @db.Text
+  messageType MessageType @default(TEXT)
+  attachments String[]
+
+  // Read status
+  isRead Boolean   @default(false)
+  readAt DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@index([conversationId])
+  @@index([senderId])
+  @@index([createdAt])
+}
+
+enum ChatStatus {
+  OPEN
+  ASSIGNED
+  RESOLVED
+  CLOSED
+}
+
+enum SenderType {
+  VISITOR
+  USER
+  AGENT
+  SYSTEM
+}
+
+enum MessageType {
+  TEXT
+  IMAGE
+  FILE
+  PROPERTY_CARD // Shared property
+}
+
+// ==================== FAVORITES ====================
+
+model Favorite {
+  id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  propertyId String
+  property   Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@unique([userId, propertyId])
+  @@index([userId])
+  @@index([propertyId])
+}
+
+// ==================== REVIEWS ====================
+
+model Review {
+  id         String   @id @default(cuid())
+  propertyId String
+  property   Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Must have been a tenant to review
+  tenancyId String?
+
+  // Ratings (1-5)
+  overallRating     Float
+  cleanlinessRating Float?
+  locationRating    Float?
+  valueRating       Float?
+  landlordRating    Float?
+
+  // Review Content
+  title   String?
+  comment String   @db.Text
+  images  String[]
+
+  // Verification
+  isVerified Boolean @default(false)
+
+  // Moderation
+  isPublished  Boolean @default(true)
+  isHidden     Boolean @default(false)
+  hiddenReason String?
+
+  // Response
+  response    String?   @db.Text
+  respondedAt DateTime?
+  respondedBy String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, propertyId])
+  @@index([propertyId])
+  @@index([overallRating])
+  @@index([createdAt])
+}
+
+// ==================== NOTIFICATIONS ====================
+
+model Notification {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  type    NotificationType
+  title   String
+  message String           @db.Text
+  data    Json?
+
+  isRead Boolean   @default(false)
+  readAt DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([isRead])
+  @@index([type])
+  @@index([createdAt])
+}
+
+enum NotificationType {
+  // Inquiry
+  NEW_INQUIRY
+  INQUIRY_ASSIGNED
+  INQUIRY_RESPONSE
+
+  // Interest & Inspection
+  NEW_INTEREST
+  SEARCH_FEE_RECEIVED
+  INSPECTION_SCHEDULED
+  INSPECTION_REMINDER
+  INSPECTION_COMPLETED
+
+  // Tenancy
+  TENANCY_CREATED
+  INITIAL_PAYMENT_RECEIVED
+  LANDLORD_CLEARED
+  MOVE_IN_REMINDER
+  RENT_DUE_REMINDER
+  RENT_RECEIVED
+  TENANCY_EXPIRING
+  TENANCY_ENDED
+
+  // Landlord
+  LANDLORD_PAYMENT_SENT
+  LANDLORD_PAYMENT_CONFIRMED
+
+  // Property
+  PROPERTY_APPROVED
+  PROPERTY_REJECTED
+  NEW_REVIEW
+
+  // System
+  SYSTEM_ANNOUNCEMENT
+  ACCOUNT_UPDATE
+}
+
+// ==================== ACTIVITY LOGGING ====================
+
+model ActivityLog {
+  id     String  @id @default(cuid())
+  userId String?
+  user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  action     String
+  module     String? // "property", "tenancy", "payment", "landlord"
+  entityType String?
+  entityId   String?
+  status     String? // "SUCCESS", "FAILED"
+
+  description String? @db.Text
+  metadata    Json?
+
+  ipAddress String?
+  userAgent String?
+
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([action])
+  @@index([module])
+  @@index([entityType])
+  @@index([createdAt])
+}
+
+// ==================== SYSTEM SETTINGS ====================
+
+model SystemSetting {
+  id          String  @id @default(cuid())
+  key         String  @unique
+  value       String  @db.Text
+  description String?
+  category    String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([category])
+}
+
+// ==================== LOCATIONS ====================
+
+model District {
+  id     String  @id @default(cuid())
+  name   String  @unique
+  region String
+  code   String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  cities City[]
+
+  @@index([region])
+}
+
+model City {
+  id         String   @id @default(cuid())
+  name       String
+  districtId String
+  district   District @relation(fields: [districtId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([name, districtId])
+  @@index([districtId])
+}

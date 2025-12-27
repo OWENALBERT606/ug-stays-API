@@ -1,0 +1,46 @@
+{
+  "name": "starter-ts",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "dev": "tsnd --respawn -r tsconfig-paths/register --pretty --transpile-only ./src/index.ts",
+    "build": "tsc && tsc-alias",
+    "start": "node ./dist",
+    "postinstall": "prisma generate"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@react-email/render": "^1.4.0",
+    "@types/bcryptjs": "^2.4.6",
+    "@types/node": "^22.4.0",
+    "@types/react": "^19.2.2",
+    "@types/react-dom": "^19.2.2",
+    "ts-node-dev": "^2.0.0",
+    "tsc-alias": "^1.8.10",
+    "tsconfig-paths": "^4.2.0",
+    "tsx": "^4.20.6",
+    "typescript": "^5.5.4"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.19.1",
+    "@react-email/components": "^0.5.7",
+    "@types/bcrypt": "^5.0.2",
+    "@types/express": "^4.17.21",
+    "@types/jsonwebtoken": "^9.0.8",
+    "bcryptjs": "^3.0.3",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "express-rate-limit": "^8.2.0",
+    "jsonwebtoken": "^9.0.2",
+    "node-cron": "^4.1.0",
+    "prisma": "^6.19.1",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "resend": "^6.3.0"
+  },
+  "packageManager": "pnpm@10.18.1+sha512.77a884a165cbba2d8d1c19e3b4880eee6d2fcabd0d879121e282196b80042351d5eb3ca0935fa599da1dc51265cc68816ad2bddd2a2de5ea9fdf92adbec7cd34"
+}
