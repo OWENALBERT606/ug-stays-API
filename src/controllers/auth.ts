@@ -1,19 +1,25 @@
-// controllers/auth.ts
+
+
+// controllers/auth.controller.ts
 import { Request, Response } from "express";
 import crypto from "crypto";
 import bcryptjs from "bcryptjs";
 import jwt from "jsonwebtoken";
+import { OAuth2Client } from "google-auth-library";
 import { db } from "@/db/db";
 import { sendResetEmailResend } from "@/utils/mailer";
 import { sendVerificationCodeResend } from "@/lib/mailer";
 import { UserRole, UserStatus } from "@prisma/client";
 
 // ==================== CONFIG ====================
-const ACCESS_TOKEN_TTL = "15m";
+const ACCESS_TOKEN_TTL = "7d"; // 7 days
 const REFRESH_TOKEN_DAYS = 30;
 const REFRESH_TOKEN_TTL_MS = 1000 * 60 * 60 * 24 * REFRESH_TOKEN_DAYS;
 const RESET_TTL_MIN = 30;
 const VERIFICATION_CODE_LENGTH = 6;
+
+// Google OAuth Client
+const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
 // ==================== HELPER FUNCTIONS ====================
 
@@ -21,9 +27,9 @@ function generateVerificationCode(): string {
   return String(crypto.randomInt(0, 1_000_000)).padStart(VERIFICATION_CODE_LENGTH, "0");
 }
 
-function generateTokens(user: { id: string; role: UserRole }) {
+function generateTokens(user: { id: string; email: string; role: UserRole }) {
   const accessToken = jwt.sign(
-    { sub: user.id, role: user.role },
+    { userId: user.id, email: user.email, role: user.role },
     process.env.JWT_SECRET!,
     { expiresIn: ACCESS_TOKEN_TTL }
   );
@@ -34,27 +40,29 @@ function generateTokens(user: { id: string; role: UserRole }) {
 }
 
 function sanitizeUser(user: any) {
+  const { password, token, ...sanitized } = user;
   return {
-    id: user.id,
-    userId: user.userId,
-    email: user.email,
-    phone: user.phone,
-    role: user.role,
-    status: user.status,
-    firstName: user.firstName,
-    lastName: user.lastName,
-    name: user.name,
-    imageUrl: user.imageUrl,
-    emailVerified: user.emailVerified,
-    createdAt: user.createdAt,
+    id: sanitized.id,
+    userId: sanitized.userId,
+    email: sanitized.email,
+    phone: sanitized.phone,
+    role: sanitized.role,
+    status: sanitized.status,
+    firstName: sanitized.firstName,
+    lastName: sanitized.lastName,
+    name: sanitized.name,
+    imageUrl: sanitized.imageUrl,
+    emailVerified: sanitized.emailVerified,
+    isApproved: sanitized.isApproved,
+    createdAt: sanitized.createdAt,
   };
 }
 
-// ==================== REGISTER ====================
+// ==================== REGISTER WITH CREDENTIALS ====================
 
 /**
- * Register a new user (Tenant by default)
- * POST /auth/register
+ * Register a new user with email/phone and password
+ * POST /api/v1/auth/register
  */
 export async function register(req: Request, res: Response) {
   try {
@@ -64,7 +72,7 @@ export async function register(req: Request, res: Response) {
       email,
       phone,
       password,
-      role = UserRole.TENANT, // Default to tenant
+      role = UserRole.TENANT,
     } = req.body;
 
     // Validation
@@ -75,11 +83,19 @@ export async function register(req: Request, res: Response) {
       });
     }
 
-    // Normalize email and phone
+    // Password validation
+    if (password.length < 8) {
+      return res.status(400).json({
+        success: false,
+        error: "Password must be at least 8 characters",
+      });
+    }
+
+    // Normalize
     const normalizedEmail = email.trim().toLowerCase();
     const normalizedPhone = phone.trim().replace(/\s+/g, "");
 
-    // Check if user already exists
+    // Check existing user
     const existingUser = await db.user.findFirst({
       where: {
         OR: [{ email: normalizedEmail }, { phone: normalizedPhone }],
@@ -100,15 +116,13 @@ export async function register(req: Request, res: Response) {
     // Generate verification code
     const verificationCode = generateVerificationCode();
 
-    // Determine initial status based on role
-    let initialStatus = UserStatus.PENDING;
-    let requiresApproval = false;
-
-    // Field officers and admins need approval
-    const rolesRequiringApproval: UserRole[] = [UserRole.FIELD_OFFICER, UserRole.ADMIN, UserRole.MANAGER];
-    if (rolesRequiringApproval.includes(role as UserRole)) {
-      requiresApproval = true;
-    }
+    // Determine if approval is needed
+    const rolesRequiringApproval: UserRole[] = [
+      UserRole.FIELD_OFFICER,
+      UserRole.ADMIN,
+      UserRole.MANAGER,
+    ];
+    const requiresApproval = rolesRequiringApproval.includes(role as UserRole);
 
     // Create user
     const user = await db.user.create({
@@ -120,7 +134,7 @@ export async function register(req: Request, res: Response) {
         phone: normalizedPhone,
         password: hashedPassword,
         role: role as UserRole,
-        status: initialStatus,
+        status: UserStatus.PENDING,
         isApproved: !requiresApproval,
         token: verificationCode,
         emailVerified: false,
@@ -128,11 +142,15 @@ export async function register(req: Request, res: Response) {
     });
 
     // Send verification email
-    await sendVerificationCodeResend({
-      to: user.email,
-      name: user.firstName,
-      code: verificationCode,
-    });
+    try {
+      await sendVerificationCodeResend({
+        to: user.email,
+        name: user.firstName,
+        code: verificationCode,
+      });
+    } catch (emailError) {
+      console.error("Failed to send verification email:", emailError);
+    }
 
     // Log activity
     await db.activityLog.create({
@@ -166,20 +184,13 @@ export async function register(req: Request, res: Response) {
 }
 
 /**
- * Register a new Field Officer (Admin only)
- * POST /auth/register/field-officer
+ * Register a Field Officer
+ * POST /api/v1/auth/register/field-officer
  */
 export async function registerFieldOfficer(req: Request, res: Response) {
   try {
-    const {
-      firstName,
-      lastName,
-      email,
-      phone,
-      password,
-    } = req.body;
+    const { firstName, lastName, email, phone, password } = req.body;
 
-    // Validation
     if (!firstName || !lastName || !email || !phone || !password) {
       return res.status(400).json({
         success: false,
@@ -190,7 +201,6 @@ export async function registerFieldOfficer(req: Request, res: Response) {
     const normalizedEmail = email.trim().toLowerCase();
     const normalizedPhone = phone.trim().replace(/\s+/g, "");
 
-    // Check existing
     const existingUser = await db.user.findFirst({
       where: {
         OR: [{ email: normalizedEmail }, { phone: normalizedPhone }],
@@ -217,7 +227,7 @@ export async function registerFieldOfficer(req: Request, res: Response) {
         password: hashedPassword,
         role: UserRole.FIELD_OFFICER,
         status: UserStatus.PENDING,
-        isApproved: false, // Needs admin approval
+        isApproved: false,
         token: verificationCode,
         emailVerified: false,
       },
@@ -246,17 +256,16 @@ export async function registerFieldOfficer(req: Request, res: Response) {
   }
 }
 
-// ==================== LOGIN ====================
+// ==================== LOGIN WITH CREDENTIALS ====================
 
 /**
- * Login user
- * POST /auth/login
+ * Login with email/phone and password
+ * POST /api/v1/auth/login
  */
 export async function login(req: Request, res: Response) {
   try {
     const { email, phone, password } = req.body;
 
-    // Can login with either email or phone
     if ((!email && !phone) || !password) {
       return res.status(400).json({
         success: false,
@@ -264,14 +273,13 @@ export async function login(req: Request, res: Response) {
       });
     }
 
-    // Find user by email or phone
+    // Find user
+    const whereConditions = [];
+    if (email) whereConditions.push({ email: email.trim().toLowerCase() });
+    if (phone) whereConditions.push({ phone: phone.trim().replace(/\s+/g, "") });
+
     const user = await db.user.findFirst({
-      where: {
-        OR: [
-          { email: email?.trim().toLowerCase() },
-          { phone: phone?.trim().replace(/\s+/g, "") },
-        ].filter(Boolean),
-      },
+      where: { OR: whereConditions },
     });
 
     if (!user) {
@@ -281,7 +289,16 @@ export async function login(req: Request, res: Response) {
       });
     }
 
-    // Check password
+    // Check if user has password (might be OAuth-only account)
+    if (!user.password) {
+      return res.status(401).json({
+        success: false,
+        error: "This account uses Google Sign-In. Please login with Google.",
+        code: "OAUTH_ACCOUNT",
+      });
+    }
+
+    // Verify password
     const isValidPassword = await bcryptjs.compare(password, user.password);
     if (!isValidPassword) {
       return res.status(401).json({
@@ -301,32 +318,35 @@ export async function login(req: Request, res: Response) {
     }
 
     // Check user status
-    if (user.status === UserStatus.SUSPENDED) {
-      return res.status(403).json({
-        success: false,
+    const statusErrors: Record<string, { error: string; code: string }> = {
+      [UserStatus.SUSPENDED]: {
         error: "Your account has been suspended. Contact support.",
         code: "ACCOUNT_SUSPENDED",
-      });
-    }
-
-    if (user.status === UserStatus.BANNED) {
-      return res.status(403).json({
-        success: false,
+      },
+      [UserStatus.BANNED]: {
         error: "Your account has been banned.",
         code: "ACCOUNT_BANNED",
-      });
-    }
-
-    if (user.status === UserStatus.INACTIVE || user.status === UserStatus.DEACTIVATED) {
-      return res.status(403).json({
-        success: false,
+      },
+      [UserStatus.INACTIVE]: {
         error: "Your account is inactive.",
         code: "ACCOUNT_INACTIVE",
+      },
+      [UserStatus.DEACTIVATED]: {
+        error: "Your account has been deactivated.",
+        code: "ACCOUNT_DEACTIVATED",
+      },
+    };
+
+    if (statusErrors[user.status]) {
+      return res.status(403).json({
+        success: false,
+        ...statusErrors[user.status],
       });
     }
 
-    // Check approval for roles that require it
-    if (!user.isApproved && ["FIELD_OFFICER", "ADMIN", "MANAGER"].includes(user.role)) {
+    // Check approval for certain roles
+    const rolesRequiringApproval = ["FIELD_OFFICER", "ADMIN", "MANAGER"];
+    if (!user.isApproved && rolesRequiringApproval.includes(user.role)) {
       return res.status(403).json({
         success: false,
         error: "Your account is pending approval",
@@ -346,7 +366,7 @@ export async function login(req: Request, res: Response) {
       },
     });
 
-    // Update user status if pending
+    // Update status if pending
     if (user.status === UserStatus.PENDING) {
       await db.user.update({
         where: { id: user.id },
@@ -387,11 +407,275 @@ export async function login(req: Request, res: Response) {
   }
 }
 
+// ==================== GOOGLE OAUTH ====================
+
+/**
+ * Sign in/up with Google
+ * POST /api/v1/auth/google
+ */
+export async function googleAuth(req: Request, res: Response) {
+  try {
+    const { idToken, role = UserRole.TENANT } = req.body;
+
+    if (!idToken) {
+      return res.status(400).json({
+        success: false,
+        error: "Google ID token is required",
+      });
+    }
+
+    // Verify the Google ID token
+    let payload;
+    try {
+      const ticket = await googleClient.verifyIdToken({
+        idToken,
+        audience: process.env.GOOGLE_CLIENT_ID,
+      });
+      payload = ticket.getPayload();
+    } catch (verifyError) {
+      console.error("Google token verification failed:", verifyError);
+      return res.status(401).json({
+        success: false,
+        error: "Invalid Google token",
+      });
+    }
+
+    if (!payload || !payload.email) {
+      return res.status(401).json({
+        success: false,
+        error: "Could not get user info from Google",
+      });
+    }
+
+    const { email, given_name, family_name, picture, sub: googleId } = payload;
+    const normalizedEmail = email.toLowerCase();
+
+    // Check if user exists
+    let user = await db.user.findUnique({
+      where: { email: normalizedEmail },
+      include: {
+        accounts: {
+          where: { provider: "google" },
+        },
+      },
+    });
+
+    if (user) {
+      // User exists - check if Google account is linked
+      const hasGoogleAccount = user.accounts.length > 0;
+
+      if (!hasGoogleAccount) {
+        // Link Google account to existing user
+        await db.account.create({
+          data: {
+            userId: user.id,
+            type: "oauth",
+            provider: "google",
+            providerAccountId: googleId!,
+            access_token: idToken,
+          },
+        });
+
+        // Update user info if missing
+        await db.user.update({
+          where: { id: user.id },
+          data: {
+            emailVerified: true, // Google emails are verified
+            imageUrl: user.imageUrl || picture,
+            firstName: user.firstName || given_name,
+            lastName: user.lastName || family_name,
+            name: user.name || `${given_name} ${family_name}`,
+          },
+        });
+      }
+
+      // Check user status
+      if (user.status === UserStatus.SUSPENDED || user.status === UserStatus.BANNED) {
+        return res.status(403).json({
+          success: false,
+          error: "Your account has been suspended or banned",
+          code: "ACCOUNT_BLOCKED",
+        });
+      }
+
+      // Check approval for certain roles
+      if (!user.isApproved && ["FIELD_OFFICER", "ADMIN", "MANAGER"].includes(user.role)) {
+        return res.status(403).json({
+          success: false,
+          error: "Your account is pending approval",
+          code: "PENDING_APPROVAL",
+        });
+      }
+
+      // Update status if needed
+      if (user.status === UserStatus.PENDING || user.status === UserStatus.INACTIVE) {
+        await db.user.update({
+          where: { id: user.id },
+          data: { status: UserStatus.ACTIVE, emailVerified: true },
+        });
+        user.status = UserStatus.ACTIVE;
+        user.emailVerified = true;
+      }
+    } else {
+      // Create new user
+      const rolesRequiringApproval = ["FIELD_OFFICER", "ADMIN", "MANAGER"];
+
+     const requiresApproval = rolesRequiringApproval.includes(role as string);
+
+      user = await db.user.create({
+        data: {
+          email: normalizedEmail,
+          firstName: given_name || "",
+          lastName: family_name || "",
+          name: `${given_name || ""} ${family_name || ""}`.trim() || normalizedEmail,
+          phone: null, // Will need to be added later
+          imageUrl: picture,
+          role: role as UserRole,
+          status: UserStatus.ACTIVE,
+          emailVerified: true, // Google emails are verified
+          isApproved: !requiresApproval,
+          password: null, // No password for OAuth users
+          accounts: {
+            create: {
+              type: "oauth",
+              provider: "google",
+              providerAccountId: googleId!,
+              access_token: idToken,
+            },
+          },
+        },
+        include: {
+          accounts: true,
+        },
+      });
+
+      // Log activity
+      await db.activityLog.create({
+        data: {
+          userId: user.id,
+          action: "USER_REGISTERED_GOOGLE",
+          module: "auth",
+          entityType: "User",
+          entityId: user.id,
+          status: "SUCCESS",
+          description: `New user registered via Google: ${user.email}`,
+        },
+      });
+    }
+
+    // Generate tokens
+    const { accessToken, refreshToken } = generateTokens(user);
+
+    // Store refresh token
+    await db.refreshToken.create({
+      data: {
+        userId: user.id,
+        token: refreshToken,
+        expiresAt: new Date(Date.now() + REFRESH_TOKEN_TTL_MS),
+      },
+    });
+
+    // Log activity
+    await db.activityLog.create({
+      data: {
+        userId: user.id,
+        action: "USER_LOGIN_GOOGLE",
+        module: "auth",
+        entityType: "User",
+        entityId: user.id,
+        status: "SUCCESS",
+        description: `User logged in via Google: ${user.email}`,
+        ipAddress: req.ip,
+        userAgent: req.headers["user-agent"],
+      },
+    });
+
+    // Check if phone is missing (needs to be added)
+    const needsPhone = !user.phone;
+
+    return res.status(200).json({
+      success: true,
+      message: user.accounts?.length === 1 ? "Account created successfully" : "Login successful",
+      data: {
+        user: sanitizeUser(user),
+        accessToken,
+        refreshToken,
+        needsPhone, // Frontend should prompt for phone if true
+      },
+    });
+  } catch (error) {
+    console.error("Google auth error:", error);
+    return res.status(500).json({
+      success: false,
+      error: "Authentication failed. Please try again.",
+    });
+  }
+}
+
+/**
+ * Add phone number to Google OAuth user
+ * POST /api/v1/auth/add-phone
+ */
+export async function addPhoneNumber(req: Request, res: Response) {
+  try {
+    const userId = (req as any).user?.userId;
+    const { phone } = req.body;
+
+    if (!userId) {
+      return res.status(401).json({
+        success: false,
+        error: "Not authenticated",
+      });
+    }
+
+    if (!phone) {
+      return res.status(400).json({
+        success: false,
+        error: "Phone number is required",
+      });
+    }
+
+    const normalizedPhone = phone.trim().replace(/\s+/g, "");
+
+    // Check if phone already exists
+    const existingUser = await db.user.findFirst({
+      where: {
+        phone: normalizedPhone,
+        NOT: { id: userId },
+      },
+    });
+
+    if (existingUser) {
+      return res.status(409).json({
+        success: false,
+        error: "This phone number is already in use",
+      });
+    }
+
+    const user = await db.user.update({
+      where: { id: userId },
+      data: { phone: normalizedPhone },
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Phone number added successfully",
+      data: sanitizeUser(user),
+    });
+  } catch (error) {
+    console.error("Add phone error:", error);
+    return res.status(500).json({
+      success: false,
+      error: "Failed to add phone number",
+    });
+  }
+}
+
 // ==================== EMAIL VERIFICATION ====================
 
 /**
  * Verify email with code
- * POST /auth/verify-email
+ * POST /api/v1/auth/verify-email
  */
 export async function verifyEmail(req: Request, res: Response) {
   try {
@@ -474,7 +758,6 @@ export async function verifyEmail(req: Request, res: Response) {
       });
     }
 
-    // For users needing approval
     return res.status(200).json({
       success: true,
       message: "Email verified. Your account is pending admin approval.",
@@ -495,7 +778,7 @@ export async function verifyEmail(req: Request, res: Response) {
 
 /**
  * Resend verification code
- * POST /auth/resend-verification
+ * POST /api/v1/auth/resend-verification
  */
 export async function resendVerification(req: Request, res: Response) {
   try {
@@ -557,7 +840,7 @@ export async function resendVerification(req: Request, res: Response) {
 
 /**
  * Request password reset
- * POST /auth/forgot-password
+ * POST /api/v1/auth/forgot-password
  */
 export async function forgotPassword(req: Request, res: Response) {
   const genericResponse = {
@@ -606,7 +889,6 @@ export async function forgotPassword(req: Request, res: Response) {
       resetUrl,
     });
 
-    // Log activity
     await db.activityLog.create({
       data: {
         userId: user.id,
@@ -627,7 +909,7 @@ export async function forgotPassword(req: Request, res: Response) {
 
 /**
  * Reset password with token
- * POST /auth/reset-password
+ * POST /api/v1/auth/reset-password
  */
 export async function resetPassword(req: Request, res: Response) {
   try {
@@ -640,7 +922,6 @@ export async function resetPassword(req: Request, res: Response) {
       });
     }
 
-    // Validate password strength
     if (newPassword.length < 8) {
       return res.status(400).json({
         success: false,
@@ -672,11 +953,9 @@ export async function resetPassword(req: Request, res: Response) {
         where: { id: record.id },
         data: { usedAt: new Date() },
       }),
-      // Revoke all sessions
       db.refreshToken.deleteMany({ where: { userId: uid } }),
     ]);
 
-    // Log activity
     await db.activityLog.create({
       data: {
         userId: uid,
@@ -705,7 +984,7 @@ export async function resetPassword(req: Request, res: Response) {
 
 /**
  * Refresh access token
- * POST /auth/refresh
+ * POST /api/v1/auth/refresh
  */
 export async function refreshAccessToken(req: Request, res: Response) {
   try {
@@ -731,7 +1010,6 @@ export async function refreshAccessToken(req: Request, res: Response) {
     }
 
     if (tokenRecord.revoked || tokenRecord.expiresAt < new Date()) {
-      // Delete expired/revoked token
       await db.refreshToken.delete({ where: { id: tokenRecord.id } });
       return res.status(401).json({
         success: false,
@@ -741,7 +1019,6 @@ export async function refreshAccessToken(req: Request, res: Response) {
 
     const user = tokenRecord.user;
 
-    // Check user status
     if (user.status !== UserStatus.ACTIVE) {
       return res.status(403).json({
         success: false,
@@ -749,10 +1026,8 @@ export async function refreshAccessToken(req: Request, res: Response) {
       });
     }
 
-    // Generate new tokens
     const { accessToken, refreshToken: newRefreshToken } = generateTokens(user);
 
-    // Rotate refresh token (delete old, create new)
     await db.$transaction([
       db.refreshToken.delete({ where: { id: tokenRecord.id } }),
       db.refreshToken.create({
@@ -784,26 +1059,23 @@ export async function refreshAccessToken(req: Request, res: Response) {
 
 /**
  * Logout user
- * POST /auth/logout
+ * POST /api/v1/auth/logout
  */
 export async function logout(req: Request, res: Response) {
   try {
     const { refreshToken } = req.body;
-    const userId = (req as any).user?.id; // From auth middleware
+    const userId = (req as any).user?.userId;
 
     if (refreshToken) {
-      // Revoke specific token
       await db.refreshToken.deleteMany({
         where: { token: refreshToken },
       });
     } else if (userId) {
-      // Revoke all tokens for user
       await db.refreshToken.deleteMany({
         where: { userId },
       });
     }
 
-    // Log activity
     if (userId) {
       await db.activityLog.create({
         data: {
@@ -832,11 +1104,11 @@ export async function logout(req: Request, res: Response) {
 
 /**
  * Logout from all devices
- * POST /auth/logout-all
+ * POST /api/v1/auth/logout-all
  */
 export async function logoutAll(req: Request, res: Response) {
   try {
-    const userId = (req as any).user?.id;
+    const userId = (req as any).user?.userId;
 
     if (!userId) {
       return res.status(401).json({
@@ -877,11 +1149,11 @@ export async function logoutAll(req: Request, res: Response) {
 
 /**
  * Get current user profile
- * GET /auth/me
+ * GET /api/v1/auth/me
  */
 export async function getMe(req: Request, res: Response) {
   try {
-    const userId = (req as any).user?.id;
+    const userId = (req as any).user?.userId;
 
     if (!userId) {
       return res.status(401).json({
@@ -893,7 +1165,6 @@ export async function getMe(req: Request, res: Response) {
     const user = await db.user.findUnique({
       where: { id: userId },
       include: {
-        // Include landlord profile if exists
         ownedLandlordProfile: {
           select: {
             id: true,
@@ -901,6 +1172,11 @@ export async function getMe(req: Request, res: Response) {
             status: true,
             mouSigned: true,
             isVerified: true,
+          },
+        },
+        accounts: {
+          select: {
+            provider: true,
           },
         },
       },
@@ -918,6 +1194,7 @@ export async function getMe(req: Request, res: Response) {
       data: {
         ...sanitizeUser(user),
         landlordProfile: user.ownedLandlordProfile,
+        linkedAccounts: user.accounts.map((a) => a.provider),
       },
     });
   } catch (error) {
@@ -931,11 +1208,11 @@ export async function getMe(req: Request, res: Response) {
 
 /**
  * Update current user profile
- * PATCH /auth/me
+ * PATCH /api/v1/auth/me
  */
 export async function updateMe(req: Request, res: Response) {
   try {
-    const userId = (req as any).user?.id;
+    const userId = (req as any).user?.userId;
 
     if (!userId) {
       return res.status(401).json({
@@ -951,10 +1228,22 @@ export async function updateMe(req: Request, res: Response) {
     if (firstName) updateData.firstName = firstName;
     if (lastName) updateData.lastName = lastName;
     if (firstName || lastName) {
-      const user = await db.user.findUnique({ where: { id: userId } });
-      updateData.name = `${firstName ?? user?.firstName} ${lastName ?? user?.lastName}`;
+      const existingUser = await db.user.findUnique({ where: { id: userId } });
+      updateData.name = `${firstName ?? existingUser?.firstName} ${lastName ?? existingUser?.lastName}`;
     }
-    if (phone) updateData.phone = phone.trim().replace(/\s+/g, "");
+    if (phone) {
+      const normalizedPhone = phone.trim().replace(/\s+/g, "");
+      const existingPhone = await db.user.findFirst({
+        where: { phone: normalizedPhone, NOT: { id: userId } },
+      });
+      if (existingPhone) {
+        return res.status(409).json({
+          success: false,
+          error: "Phone number already in use",
+        });
+      }
+      updateData.phone = normalizedPhone;
+    }
     if (imageUrl) updateData.imageUrl = imageUrl;
     if (address !== undefined) updateData.address = address;
     if (district !== undefined) updateData.district = district;
@@ -992,11 +1281,11 @@ export async function updateMe(req: Request, res: Response) {
 
 /**
  * Change password
- * POST /auth/change-password
+ * POST /api/v1/auth/change-password
  */
 export async function changePassword(req: Request, res: Response) {
   try {
-    const userId = (req as any).user?.id;
+    const userId = (req as any).user?.userId;
 
     if (!userId) {
       return res.status(401).json({
@@ -1030,6 +1319,14 @@ export async function changePassword(req: Request, res: Response) {
       });
     }
 
+    // Check if user has a password (OAuth users might not)
+    if (!user.password) {
+      return res.status(400).json({
+        success: false,
+        error: "Cannot change password for OAuth accounts. Please set a password first.",
+      });
+    }
+
     const isValid = await bcryptjs.compare(currentPassword, user.password);
 
     if (!isValid) {
@@ -1041,14 +1338,10 @@ export async function changePassword(req: Request, res: Response) {
 
     const hashedPassword = await bcryptjs.hash(newPassword, 12);
 
-    await db.$transaction([
-      db.user.update({
-        where: { id: userId },
-        data: { password: hashedPassword },
-      }),
-      // Optionally revoke other sessions
-      // db.refreshToken.deleteMany({ where: { userId } }),
-    ]);
+    await db.user.update({
+      where: { id: userId },
+      data: { password: hashedPassword },
+    });
 
     await db.activityLog.create({
       data: {
@@ -1074,15 +1367,86 @@ export async function changePassword(req: Request, res: Response) {
   }
 }
 
-// ==================== ADMIN: USER APPROVAL ====================
+/**
+ * Set password for OAuth user
+ * POST /api/v1/auth/set-password
+ */
+export async function setPassword(req: Request, res: Response) {
+  try {
+    const userId = (req as any).user?.userId;
+
+    if (!userId) {
+      return res.status(401).json({
+        success: false,
+        error: "Not authenticated",
+      });
+    }
+
+    const { newPassword } = req.body;
+
+    if (!newPassword || newPassword.length < 8) {
+      return res.status(400).json({
+        success: false,
+        error: "Password must be at least 8 characters",
+      });
+    }
+
+    const user = await db.user.findUnique({ where: { id: userId } });
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        error: "User not found",
+      });
+    }
+
+    if (user.password) {
+      return res.status(400).json({
+        success: false,
+        error: "Password already set. Use change password instead.",
+      });
+    }
+
+    const hashedPassword = await bcryptjs.hash(newPassword, 12);
+
+    await db.user.update({
+      where: { id: userId },
+      data: { password: hashedPassword },
+    });
+
+    await db.activityLog.create({
+      data: {
+        userId,
+        action: "PASSWORD_SET",
+        module: "auth",
+        entityType: "User",
+        entityId: userId,
+        status: "SUCCESS",
+      },
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Password set successfully",
+    });
+  } catch (error) {
+    console.error("Set password error:", error);
+    return res.status(500).json({
+      success: false,
+      error: "Failed to set password",
+    });
+  }
+}
+
+// ==================== ADMIN: USER MANAGEMENT ====================
 
 /**
  * Approve a user (Admin only)
- * POST /auth/approve/:userId
+ * POST /api/v1/auth/approve/:userId
  */
 export async function approveUser(req: Request, res: Response) {
   try {
-    const adminId = (req as any).user?.id;
+    const adminId = (req as any).user?.userId;
     const { userId } = req.params;
 
     const user = await db.user.findUnique({ where: { id: userId } });
@@ -1109,7 +1473,6 @@ export async function approveUser(req: Request, res: Response) {
       },
     });
 
-    // Create notification
     await db.notification.create({
       data: {
         userId: userId,
@@ -1146,11 +1509,11 @@ export async function approveUser(req: Request, res: Response) {
 
 /**
  * Suspend a user (Admin only)
- * POST /auth/suspend/:userId
+ * POST /api/v1/auth/suspend/:userId
  */
 export async function suspendUser(req: Request, res: Response) {
   try {
-    const adminId = (req as any).user?.id;
+    const adminId = (req as any).user?.userId;
     const { userId } = req.params;
     const { reason } = req.body;
 
@@ -1168,7 +1531,6 @@ export async function suspendUser(req: Request, res: Response) {
         where: { id: userId },
         data: { status: UserStatus.SUSPENDED },
       }),
-      // Revoke all sessions
       db.refreshToken.deleteMany({ where: { userId } }),
     ]);
 
@@ -1208,11 +1570,11 @@ export async function suspendUser(req: Request, res: Response) {
 
 /**
  * Reactivate a suspended user (Admin only)
- * POST /auth/reactivate/:userId
+ * POST /api/v1/auth/reactivate/:userId
  */
 export async function reactivateUser(req: Request, res: Response) {
   try {
-    const adminId = (req as any).user?.id;
+    const adminId = (req as any).user?.userId;
     const { userId } = req.params;
 
     const user = await db.user.findUnique({ where: { id: userId } });
@@ -1266,6 +1628,94 @@ export async function reactivateUser(req: Request, res: Response) {
     return res.status(500).json({
       success: false,
       error: "Failed to reactivate user",
+    });
+  }
+}
+
+
+
+export async function completeProfile(req: Request, res: Response) {
+  try {
+    const { email, district, city, address } = req.body;
+
+    // Validate email
+    if (!email) {
+      return res.status(400).json({
+        success: false,
+        error: "Email is required",
+      });
+    }
+
+    // Find user by email
+    const user = await db.user.findUnique({
+      where: { email: email.toLowerCase() },
+    });
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        error: "User not found",
+      });
+    }
+
+    // Only allow completing profile for verified users
+    if (!user.emailVerified) {
+      return res.status(403).json({
+        success: false,
+        error: "Please verify your email first",
+      });
+    }
+
+    // Build update data - only allow safe fields
+    const updateData: any = {};
+    
+    if (district !== undefined) {
+      updateData.district = district || null;
+    }
+    if (city !== undefined) {
+      updateData.city = city || null;
+    }
+    if (address !== undefined) {
+      updateData.address = address || null;
+    }
+
+    // Only update if there's something to update
+    if (Object.keys(updateData).length === 0) {
+      return res.status(200).json({
+        success: true,
+        message: "No changes to update",
+      });
+    }
+
+    // Update user
+    await db.user.update({
+      where: { id: user.id },
+      data: updateData,
+    });
+
+    // Log activity
+    await db.activityLog.create({
+      data: {
+        userId: user.id,
+        action: "PROFILE_COMPLETED",
+        module: "auth",
+        entityType: "User",
+        entityId: user.id,
+        status: "SUCCESS",
+        description: "User completed profile during registration",
+      },
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Profile updated successfully",
+    });
+
+  } catch (error: any) {
+    console.error("Complete profile error:", error);
+    return res.status(500).json({
+      success: false,
+      error: "Failed to update profile",
     });
   }
 }

@@ -69,7 +69,7 @@ if (password.length < 6) {
 
     const emailNorm = email.trim().toLowerCase();
     const phoneNorm = phone.trim();
-    const roleValue: UserRole = isValidRole(role) ? (role as UserRole) : UserRole.USER;
+    const roleValue: UserRole = isValidRole(role) ? (role as UserRole) : UserRole.TENANT;
     const statusValue: UserStatus = isValidStatus(status) ? (status as UserStatus) : UserStatus.ACTIVE;
 
     // Pre-check (optional but gives nicer error than catching P2002)

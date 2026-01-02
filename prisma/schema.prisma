@@ -43,10 +43,10 @@ model User {
   name          String
   firstName     String
   lastName      String
-  phone         String     @unique
+  phone         String?     @unique
   email         String     @unique
   emailVerified Boolean    @default(false)
-  password      String
+  password      String?
   imageUrl      String     @default("https://ylhpxhcgr4.ufs.sh/f/ZVlDsNdibGfFLkXm6f8jxEOgRvuoCGdTw7N05shB2kHlF1LU")
   role          UserRole   @default(TENANT)
   status        UserStatus @default(PENDING)
@@ -162,7 +162,7 @@ model Landlord {
   firstName String
   lastName  String
   email     String  @unique
-  phone     String  @unique
+  phone     String? @unique
   altPhone  String?
   imageUrl  String?
 
